@@ -91,8 +91,8 @@
           </el-form-item>
           <el-form-item prop="enabledNotifications" :label="$t('Message Notification')">
             <el-checkbox-group v-model="userInfo.setting.enabled_notifications">
-              <el-checkbox label="notification_type_mail">{{$t('Mail')}}</el-checkbox>
-              <el-checkbox label="notification_type_ding_talk">{{$t('Ding Talk')}}</el-checkbox>
+              <el-checkbox label="notification_type_mail">{{$t('Email')}}</el-checkbox>
+              <el-checkbox label="notification_type_ding_talk">{{$t('DingTalk')}}</el-checkbox>
               <el-checkbox label="notification_type_wechat">{{$t('WeChat')}}</el-checkbox>
             </el-checkbox-group>
           </el-form-item>
