@@ -89,11 +89,11 @@
               </el-radio>
             </el-radio-group>
           </el-form-item>
-          <el-form-item prop="enabledNotifications" :label="$t('消息通知方式')">
+          <el-form-item prop="enabledNotifications" :label="$t('Message Notification')">
             <el-checkbox-group v-model="userInfo.setting.enabled_notifications">
-              <el-checkbox label="notification_type_mail">{{$t('邮件')}}</el-checkbox>
-              <el-checkbox label="notification_type_ding_talk">{{$t('钉钉')}}</el-checkbox>
-              <el-checkbox label="notification_type_wechat">{{$t('企业微信')}}</el-checkbox>
+              <el-checkbox label="notification_type_mail">{{$t('Mail')}}</el-checkbox>
+              <el-checkbox label="notification_type_ding_talk">{{$t('Ding Talk')}}</el-checkbox>
+              <el-checkbox label="notification_type_wechat">{{$t('WeChat')}}</el-checkbox>
             </el-checkbox-group>
           </el-form-item>
           <el-form-item prop="email" :label="$t('Email')">
