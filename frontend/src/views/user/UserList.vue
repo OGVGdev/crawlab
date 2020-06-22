@@ -30,7 +30,7 @@
       <div class="filter">
         <div class="left"></div>
         <div class="right">
-          <el-button type="success" icon="el-icon-plus" size="small" @click="onClickAddUser">添加用户</el-button>
+          <el-button type="success" icon="el-icon-plus" size="small" @click="onClickAddUser">Add User</el-button>
         </div>
       </div>
       <!--table-->
