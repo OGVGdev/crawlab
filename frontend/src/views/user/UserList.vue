@@ -11,8 +11,8 @@
         </el-form-item>
         <el-form-item prop="role" :label="$t('Role')" required>
           <el-select v-model="userForm.role" :placeholder="$t('Role')">
-            <el-option value="admin" :label="$t('admin')"></el-option>
-            <el-option value="normal" :label="$t('normal')"></el-option>
+            <el-option value="admin" :label="$t('Admin')"></el-option>
+            <el-option value="normal" :label="$t('Normal')"></el-option>
           </el-select>
         </el-form-item>
         <el-form-item prop="email" :label="$t('Email')">
