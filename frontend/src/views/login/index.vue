@@ -69,11 +69,6 @@
           <img src="https://img.shields.io/github/stars/crawlab-team/crawlab?logo=github">
         </a>
       </div>
-      <div class="lang">
-        <span @click="setLang('zh')" :class="lang==='zh'?'active':''">中文</span>
-        |
-        <span @click="setLang('en')" :class="lang==='en'?'active':''">English</span>
-      </div>
       <div class="documentation">
         <a href="http://docs.crawlab.cn" target="_blank">{{$t('Documentation')}}</a>
       </div>
