@@ -35,20 +35,6 @@
         </el-dropdown-item>
       </el-dropdown-menu>
     </el-dropdown>
-    <el-dropdown class="lang-list right" trigger="click">
-      <span class="el-dropdown-link">
-        {{$t($store.getters['lang/lang'])}}
-        <i class="el-icon-arrow-down el-icon--right"></i>
-      </span>
-      <el-dropdown-menu slot="dropdown">
-        <el-dropdown-item @click.native="setLang('zh')">
-          <span>中文</span>
-        </el-dropdown-item>
-        <el-dropdown-item @click.native="setLang('en')">
-          <span>English</span>
-        </el-dropdown-item>
-      </el-dropdown-menu>
-    </el-dropdown>
     <div class="documentation right">
       <a href="http://docs.crawlab.cn" target="_blank">
         <font-awesome-icon :icon="['far', 'question-circle']"/>
