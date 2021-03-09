@@ -4,31 +4,31 @@ import (
 	"bufio"
 	"crawlab/constants"
 	"crawlab/database"
-	"crawlab/entity"
 	"crawlab/lib/cron"
 	"crawlab/model"
+	"crawlab/services/local_node"
 	"crawlab/services/notification"
+	"crawlab/services/rpc"
 	"crawlab/services/spider_handler"
+	"crawlab/services/sys_exec"
 	"crawlab/utils"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/apex/log"
+	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/imroc/req"
-	uuid "github.com/satori/go.uuid"
+	"github.com/satori/go.uuid"
 	"github.com/spf13/viper"
 	"net/http"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
-	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -114,9 +114,7 @@ func AssignTask(task model.Task) error {
 func SetEnv(cmd *exec.Cmd, envs []model.Env, task model.Task, spider model.Spider) *exec.Cmd {
 	// 默认把Node.js的全局node_modules加入环境变量
 	envPath := os.Getenv("PATH")
-	homePath := os.Getenv("HOME")
-	nodeVersion := "v10.19.0"
-	nodePath := path.Join(homePath, ".nvm/versions/node", nodeVersion, "lib/node_modules")
+	nodePath := "/usr/lib/node_modules"
 	if !strings.Contains(envPath, nodePath) {
 		_ = os.Setenv("PATH", nodePath+":"+envPath)
 	}
@@ -166,32 +164,38 @@ func SetEnv(cmd *exec.Cmd, envs []model.Env, task model.Task, spider model.Spide
 	return cmd
 }
 
-func SetLogConfig(cmd *exec.Cmd, t model.Task, u model.User) error {
+func SetLogConfig(wg *sync.WaitGroup, cmd *exec.Cmd, t model.Task, u model.User) error {
+
+	esChan := make(chan string, 1)
+	esClientStr := viper.GetString("setting.esClient")
+	spiderLogIndex := viper.GetString("setting.spiderLogIndex")
 	// get stdout reader
 	stdout, err := cmd.StdoutPipe()
-	readerStdout := bufio.NewReader(stdout)
 	if err != nil {
 		log.Errorf("get stdout error: %s", err.Error())
 		debug.PrintStack()
 		return err
 	}
+	readerStdout := bufio.NewReader(stdout)
 
 	// get stderr reader
 	stderr, err := cmd.StderrPipe()
-	readerStderr := bufio.NewReader(stderr)
 	if err != nil {
 		log.Errorf("get stdout error: %s", err.Error())
 		debug.PrintStack()
 		return err
 	}
+	readerStderr := bufio.NewReader(stderr)
 
 	var seq int64
 	var logs []model.LogItem
 	isStdoutFinished := false
 	isStderrFinished := false
 
-	// periodically (1 sec) insert log items
+	// periodically (5 sec) insert log items
+	wg.Add(3)
 	go func() {
+		defer wg.Done()
 		for {
 			_ = model.AddLogItems(logs)
 			logs = []model.LogItem{}
@@ -205,12 +209,13 @@ func SetLogConfig(cmd *exec.Cmd, t model.Task, u model.User) error {
 	// expire duration (in seconds)
 	expireDuration := u.Setting.LogExpireDuration
 	if expireDuration == 0 {
-		// by default not expire
-		expireDuration = constants.Infinite
+		// by default 1 day
+		expireDuration = 3600 * 24
 	}
 
 	// read stdout
 	go func() {
+		defer wg.Done()
 		for {
 			line, err := readerStdout.ReadString('\n')
 			if err != nil {
@@ -227,12 +232,19 @@ func SetLogConfig(cmd *exec.Cmd, t model.Task, u model.User) error {
 				Ts:       time.Now(),
 				ExpireTs: time.Now().Add(time.Duration(expireDuration) * time.Second),
 			}
+
+			if esClientStr != "" {
+				esChan <- l.Message
+				go database.WriteMsgToES(time.Now(), esChan, spiderLogIndex)
+			}
+
 			logs = append(logs, l)
 		}
 	}()
 
 	// read stderr
 	go func() {
+		defer wg.Done()
 		for {
 			line, err := readerStderr.ReadString('\n')
 			if err != nil {
@@ -249,10 +261,16 @@ func SetLogConfig(cmd *exec.Cmd, t model.Task, u model.User) error {
 				Ts:       time.Now(),
 				ExpireTs: time.Now().Add(time.Duration(expireDuration) * time.Second),
 			}
+
+			if esClientStr != "" {
+				esChan <- l.Message
+				go database.WriteMsgToES(time.Now(), esChan, spiderLogIndex)
+			}
 			logs = append(logs, l)
 		}
 	}()
 
+	wg.Wait()
 	return nil
 }
 
@@ -262,15 +280,8 @@ func FinishOrCancelTask(ch chan string, cmd *exec.Cmd, s model.Spider, t model.T
 	log.Infof("process received signal: %s", signal)
 
 	if signal == constants.TaskCancel && cmd.Process != nil {
-		var err error
-		// 兼容windows
-		if runtime.GOOS == constants.Windows {
-			err = cmd.Process.Kill()
-		} else {
-			err = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		// 取消进程
-		if err != nil {
+		// 终止进程
+		if err := sys_exec.KillProcess(cmd); err != nil {
 			log.Errorf("process kill error: %s", err.Error())
 			debug.PrintStack()
 
@@ -337,21 +348,16 @@ func ExecuteShellCmd(cmdStr string, cwd string, t model.Task, s model.Spider, u 
 	log.Infof("cwd: %s", cwd)
 	log.Infof("cmd: %s", cmdStr)
 
+	wg := &sync.WaitGroup{}
+
 	// 生成执行命令
-	var cmd *exec.Cmd
-	if runtime.GOOS == constants.Windows {
-		cmd = exec.Command("cmd", "/C", cmdStr)
-	} else {
-		cmd = exec.Command("sh", "-c", cmdStr)
-	}
+	cmd := sys_exec.BuildCmd(cmdStr)
 
 	// 工作目录
 	cmd.Dir = cwd
 
 	// 日志配置
-	if err := SetLogConfig(cmd, t, u); err != nil {
-		return err
-	}
+	go SetLogConfig(wg, cmd, t, u)
 
 	// 环境变量配置
 	envs := s.Envs
@@ -373,13 +379,10 @@ func ExecuteShellCmd(cmdStr string, cwd string, t model.Task, s model.Spider, u 
 
 	// 起一个goroutine来监控进程
 	ch := utils.TaskExecChanMap.ChanBlocked(t.Id)
-
 	go FinishOrCancelTask(ch, cmd, s, t)
 
 	// kill的时候，可以kill所有的子进程
-	if runtime.GOOS != constants.Windows {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
+	sys_exec.Setpgid(cmd)
 
 	// 启动进程
 	if err := StartTaskProcess(cmd, t); err != nil {
@@ -390,37 +393,17 @@ func ExecuteShellCmd(cmdStr string, cwd string, t model.Task, s model.Spider, u 
 	if err := WaitTaskProcess(cmd, t, s); err != nil {
 		return err
 	}
-	ch <- constants.TaskFinish
-	return nil
-}
 
-// 生成日志目录
-func MakeLogDir(t model.Task) (fileDir string, err error) {
-	// 日志目录
-	fileDir = filepath.Join(viper.GetString("log.path"), t.SpiderId.Hex())
-
-	// 如果日志目录不存在，生成该目录
-	if !utils.Exists(fileDir) {
-		if err := os.MkdirAll(fileDir, 0777); err != nil {
-			log.Errorf("execute task, make log dir error: %s", err.Error())
-			debug.PrintStack()
-			return "", err
-		}
+	// 如果返回值不为0，返回错误
+	returnCode := cmd.ProcessState.ExitCode()
+	if returnCode != 0 {
+		log.Errorf(fmt.Sprintf("task returned code not zero: %d", returnCode))
+		debug.PrintStack()
+		return errors.New(fmt.Sprintf("task returned code not zero: %d", returnCode))
 	}
 
-	return fileDir, nil
-}
-
-// 获取日志文件路径
-func GetLogFilePaths(fileDir string, t model.Task) (filePath string) {
-	// 时间戳
-	ts := time.Now()
-	tsStr := ts.Format("20060102150405")
-
-	// stdout日志文件
-	filePath = filepath.Join(fileDir, t.Id+"_"+tsStr+".log")
-
-	return filePath
+	ch <- constants.TaskFinish
+	return nil
 }
 
 // 生成执行任务方法
@@ -483,18 +466,20 @@ func ExecuteTask(id int) {
 	tic := time.Now()
 
 	// 获取当前节点
-	node, err := model.GetCurrentNode()
-	if err != nil {
-		log.Errorf("execute task get current node error: %s", err.Error())
-		debug.PrintStack()
-		return
-	}
+	//node, err := model.GetCurrentNode()
+	//if err != nil {
+	//	log.Errorf("execute task get current node error: %s", err.Error())
+	//	debug.PrintStack()
+	//	return
+	//}
+	node := local_node.CurrentNode()
 
 	// 节点队列
 	queueCur := "tasks:node:" + node.Id.Hex()
 
 	// 节点队列任务
 	var msg string
+	var err error
 	if msg, err = database.RedisClient.LPop(queueCur); err != nil {
 		// 节点队列没有任务，获取公共队列任务
 		queuePub := "tasks:public"
@@ -522,19 +507,14 @@ func ExecuteTask(id int) {
 	}
 
 	// 获取爬虫
-	spider, err := t.GetSpider()
-	if err != nil {
-		log.Errorf("execute task, get spider error: %s", err.Error())
-		return
+	var spider model.Spider
+	if t.Type == constants.TaskTypeSpider {
+		spider, err = t.GetSpider()
+		if err != nil {
+			log.Errorf("execute task, get spider error: %s", err.Error())
+			return
+		}
 	}
-
-	// 创建日志目录
-	var fileDir string
-	if fileDir, err = MakeLogDir(t); err != nil {
-		return
-	}
-	// 获取日志文件路径
-	t.LogPath = GetLogFilePaths(fileDir, t)
 
 	// 工作目录
 	cwd := filepath.Join(
@@ -544,12 +524,19 @@ func ExecuteTask(id int) {
 
 	// 执行命令
 	var cmd string
-	if spider.Type == constants.Configurable {
-		// 可配置爬虫命令
-		cmd = "scrapy crawl config_spider"
-	} else {
-		// 自定义爬虫命令
-		cmd = spider.Cmd
+	if t.Type == constants.TaskTypeSpider {
+		// 爬虫任务
+		if spider.Type == constants.Configurable {
+			// 可配置爬虫命令
+			cmd = "scrapy crawl config_spider"
+		} else {
+			// 自定义爬虫命令
+			cmd = spider.Cmd
+		}
+		t.Cmd = cmd
+	} else if t.Type == constants.TaskTypeSystem {
+		// 系统任务
+		cmd = t.Cmd
 	}
 
 	// 加入参数
@@ -570,42 +557,51 @@ func ExecuteTask(id int) {
 	t.Status = constants.StatusRunning                   // 任务状态
 	t.WaitDuration = t.StartTs.Sub(t.CreateTs).Seconds() // 等待时长
 
-	// 发送 Web Hook 请求 (任务开始)
-	go SendWebHookRequest(user, t, spider)
-
-	// 文件检查
-	if err := SpiderFileCheck(t, spider); err != nil {
-		log.Errorf("spider file check error: %s", err.Error())
-		return
-	}
-
-	// 开始执行任务
-	log.Infof(GetWorkerPrefix(id) + "start task (id:" + t.Id + ")")
-
 	// 储存任务
 	_ = t.Save()
 
-	// 起一个cron执行器来统计任务结果数
-	cronExec := cron.New(cron.WithSeconds())
-	_, err = cronExec.AddFunc("*/5 * * * * *", SaveTaskResultCount(t.Id))
-	if err != nil {
-		log.Errorf(GetWorkerPrefix(id) + err.Error())
-		debug.PrintStack()
-		return
-	}
-	cronExec.Start()
-	defer cronExec.Stop()
+	// 发送 Web Hook 请求 (任务开始)
+	go SendWebHookRequest(user, t, spider)
 
-	// 起一个cron来更新错误日志
-	cronExecErrLog := cron.New(cron.WithSeconds())
-	_, err = cronExecErrLog.AddFunc("*/30 * * * * *", ScanErrorLogs(t))
-	if err != nil {
-		log.Errorf(GetWorkerPrefix(id) + err.Error())
-		debug.PrintStack()
-		return
+	// 爬虫任务专属逻辑
+	if t.Type == constants.TaskTypeSpider {
+		// 文件检查
+		if err := SpiderFileCheck(t, spider); err != nil {
+			log.Errorf("spider file check error: %s", err.Error())
+			return
+		}
+
+		// 开始执行任务
+		log.Infof(GetWorkerPrefix(id) + "start task (id:" + t.Id + ")")
+
+		// 创建结果集索引
+		go func() {
+			col := utils.GetSpiderCol(spider.Col, spider.Name)
+			CreateResultsIndexes(col)
+		}()
+
+		// 起一个cron执行器来统计任务结果数
+		cronExec := cron.New(cron.WithSeconds())
+		_, err = cronExec.AddFunc("*/5 * * * * *", SaveTaskResultCount(t.Id))
+		if err != nil {
+			log.Errorf(GetWorkerPrefix(id) + err.Error())
+			debug.PrintStack()
+			return
+		}
+		cronExec.Start()
+		defer cronExec.Stop()
+
+		// 起一个cron来更新错误日志
+		cronExecErrLog := cron.New(cron.WithSeconds())
+		_, err = cronExecErrLog.AddFunc("*/30 * * * * *", ScanErrorLogs(t))
+		if err != nil {
+			log.Errorf(GetWorkerPrefix(id) + err.Error())
+			debug.PrintStack()
+			return
+		}
+		cronExecErrLog.Start()
+		defer cronExecErrLog.Stop()
 	}
-	cronExecErrLog.Start()
-	defer cronExecErrLog.Stop()
 
 	// 执行Shell命令
 	if err := ExecuteShellCmd(cmd, cwd, t, spider, user); err != nil {
@@ -664,11 +660,13 @@ func ExecuteTask(id int) {
 
 func FinishUpTask(s model.Spider, t model.Task) {
 	// 更新任务结果数
-	go func() {
-		if err := model.UpdateTaskResultCount(t.Id); err != nil {
-			return
-		}
-	}()
+	if t.Type == constants.TaskTypeSpider {
+		go func() {
+			if err := model.UpdateTaskResultCount(t.Id); err != nil {
+				return
+			}
+		}()
+	}
 
 	// 更新任务错误日志
 	go func() {
@@ -745,46 +743,25 @@ func CancelTask(id string) (err error) {
 	}
 
 	// 获取当前节点（默认当前节点为主节点）
-	node, err := model.GetCurrentNode()
-	if err != nil {
-		log.Errorf("get current node error: %s", err.Error())
-		debug.PrintStack()
-		return err
-	}
+	//node, err := model.GetCurrentNode()
+	//if err != nil {
+	//	log.Errorf("get current node error: %s", err.Error())
+	//	debug.PrintStack()
+	//	return err
+	//}
+	node := local_node.CurrentNode()
 
 	log.Infof("current node id is: %s", node.Id.Hex())
 	log.Infof("task node id is: %s", task.NodeId.Hex())
 
 	if node.Id == task.NodeId {
 		// 任务节点为主节点
-
-		// 获取任务执行频道
-		ch := utils.TaskExecChanMap.ChanBlocked(id)
-		if ch != nil {
-			// 发出取消进程信号
-			ch <- constants.TaskCancel
-		} else {
-			if err := model.UpdateTaskToAbnormal(node.Id); err != nil {
-				log.Errorf("update task to abnormal : {}", err.Error())
-				debug.PrintStack()
-				return err
-			}
+		if err := rpc.CancelTaskLocal(task.Id, task.NodeId.Hex()); err != nil {
+			return err
 		}
 	} else {
 		// 任务节点为工作节点
-
-		// 序列化消息
-		msg := entity.NodeMessage{
-			Type:   constants.MsgTypeCancelTask,
-			TaskId: id,
-		}
-		msgBytes, err := json.Marshal(&msg)
-		if err != nil {
-			return err
-		}
-
-		// 发布消息
-		if _, err := database.RedisClient.Publish("nodes:"+task.NodeId.Hex(), utils.BytesToString(msgBytes)); err != nil {
+		if err := rpc.CancelTaskRemote(task.Id, task.NodeId.Hex()); err != nil {
 			return err
 		}
 	}
@@ -804,10 +781,12 @@ func RestartTask(id string, uid bson.ObjectId) (err error) {
 	newTask := model.Task{
 		SpiderId:   oldTask.SpiderId,
 		NodeId:     oldTask.NodeId,
+		Cmd:        oldTask.Cmd,
 		Param:      oldTask.Param,
 		UserId:     uid,
 		RunType:    oldTask.RunType,
 		ScheduleId: bson.ObjectIdHex(constants.ObjectIdNull),
+		Type:       oldTask.Type,
 	}
 
 	// 加入任务队列
@@ -945,6 +924,15 @@ func GetTaskMarkdownContent(t model.Task, s model.Spider) string {
 		t.ResultCount,
 		errLog,
 	)
+}
+
+func CreateResultsIndexes(col string) {
+	s, c := database.GetCol(col)
+	defer s.Close()
+
+	_ = c.EnsureIndex(mgo.Index{
+		Key: []string{"task_id"},
+	})
 }
 
 func SendTaskEmail(u model.User, t model.Task, s model.Spider) {

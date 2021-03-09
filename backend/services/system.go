@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/apex/log"
+	"github.com/globalsign/mgo"
+	"github.com/globalsign/mgo/bson"
 	"github.com/imroc/req"
 	"os/exec"
 	"regexp"
@@ -55,9 +57,9 @@ func GetRemoteSystemInfo(nodeId string) (sysInfo entity.SystemInfo, err error) {
 // 获取系统信息
 func GetSystemInfo(nodeId string) (sysInfo entity.SystemInfo, err error) {
 	if IsMasterNode(nodeId) {
-		sysInfo, err = model.GetLocalSystemInfo()
+		sysInfo, err = rpc.GetSystemInfoServiceLocal()
 	} else {
-		sysInfo, err = GetRemoteSystemInfo(nodeId)
+		sysInfo, err = rpc.GetSystemInfoServiceRemote(nodeId)
 	}
 	return
 }
@@ -72,7 +74,24 @@ func GetLangList(nodeId string) []entity.Lang {
 	return list
 }
 
+// 获取语言安装状态
 func GetLangInstallStatus(nodeId string, lang entity.Lang) (string, error) {
+	_, err := model.GetTaskByFilter(bson.M{
+		"node_id": nodeId,
+		"cmd":     fmt.Sprintf("sh %s", utils.GetSystemScriptPath(lang.InstallScript)),
+		"status": bson.M{
+			"$in": []string{constants.StatusPending, constants.StatusRunning},
+		},
+	})
+	if err == nil {
+		// 任务正在运行，正在安装
+		return constants.InstallStatusInstalling, nil
+	}
+	if err != mgo.ErrNotFound {
+		// 发生错误
+		return "", err
+	}
+	// 获取状态
 	if IsMasterNode(nodeId) {
 		lang := rpc.GetLangLocal(lang)
 		return lang.InstallStatus, nil

@@ -5,6 +5,7 @@ import (
 	"crawlab/database"
 	"crawlab/utils"
 	"github.com/apex/log"
+	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"runtime/debug"
 	"time"
@@ -29,11 +30,13 @@ type Task struct {
 	Pid             int           `json:"pid" bson:"pid"`
 	RunType         string        `json:"run_type" bson:"run_type"`
 	ScheduleId      bson.ObjectId `json:"schedule_id" bson:"schedule_id"`
+	Type            string        `json:"type" bson:"type"`
 
 	// 前端数据
-	SpiderName string `json:"spider_name"`
-	NodeName   string `json:"node_name"`
-	Username   string `json:"username"`
+	SpiderName string   `json:"spider_name"`
+	NodeName   string   `json:"node_name"`
+	Username   string   `json:"username"`
+	NodeIds    []string `json:"node_ids"`
 
 	UserId   bson.ObjectId `json:"user_id" bson:"user_id"`
 	CreateTs time.Time     `json:"create_ts" bson:"create_ts"`
@@ -451,7 +454,12 @@ func UpdateTaskToAbnormal(nodeId bson.ObjectId) error {
 
 	selector := bson.M{
 		"node_id": nodeId,
-		"status":  constants.StatusRunning,
+		"status": bson.M{
+			"$in": []string{
+				constants.StatusPending,
+				constants.StatusRunning,
+			},
+		},
 	}
 	update := bson.M{
 		"$set": bson.M{
@@ -507,4 +515,20 @@ func UpdateTaskErrorLogs(taskId string, errorRegexPattern string) error {
 	}
 
 	return nil
+}
+
+func GetTaskByFilter(filter bson.M) (t Task, err error) {
+	s, c := database.GetCol("tasks")
+	defer s.Close()
+
+	if err := c.Find(filter).One(&t); err != nil {
+		if err != mgo.ErrNotFound {
+			log.Errorf("find task by filter error: " + err.Error())
+			debug.PrintStack()
+			return t, err
+		}
+		return t, err
+	}
+
+	return t, nil
 }
