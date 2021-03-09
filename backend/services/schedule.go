@@ -58,6 +58,7 @@ func AddScheduleTask(s model.Schedule) func() {
 					UserId:     s.UserId,
 					RunType:    constants.RunTypeAllNodes,
 					ScheduleId: s.Id,
+					Type:       constants.TaskTypeSpider,
 				}
 
 				if _, err := AddTask(t); err != nil {
@@ -73,6 +74,7 @@ func AddScheduleTask(s model.Schedule) func() {
 				UserId:     s.UserId,
 				RunType:    constants.RunTypeRandom,
 				ScheduleId: s.Id,
+				Type:       constants.TaskTypeSpider,
 			}
 			if _, err := AddTask(t); err != nil {
 				log.Errorf(err.Error())
@@ -90,6 +92,7 @@ func AddScheduleTask(s model.Schedule) func() {
 					UserId:     s.UserId,
 					RunType:    constants.RunTypeSelectedNodes,
 					ScheduleId: s.Id,
+					Type:       constants.TaskTypeSpider,
 				}
 
 				if _, err := AddTask(t); err != nil {
@@ -220,7 +223,7 @@ func (s *Scheduler) Update() error {
 	s.RemoveAll()
 
 	// 获取所有定时任务
-	sList, err := model.GetScheduleList(nil)
+	sList, err := model.GetScheduleList(bson.M{"enabled": true})
 	if err != nil {
 		log.Errorf("get scheduler list error: %s", err.Error())
 		debug.PrintStack()

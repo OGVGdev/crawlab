@@ -22,8 +22,11 @@ fi
 # start nginx
 service nginx start
 
+#grant script 
+chmod +x /app/backend/scripts/*.sh
+
 # install languages
-if [ "${CRAWLAB_SERVER_LANG_NODE}" = "Y" ] || [ "${CRAWLAB_SERVER_LANG_JAVA}" = "Y" ];
+if [ "${CRAWLAB_SERVER_LANG_NODE}" = "Y" ] || [ "${CRAWLAB_SERVER_LANG_JAVA}" = "Y" ] || [ "${CRAWLAB_SERVER_LANG_DOTNET}" = "Y" ] || [ "${CRAWLAB_SERVER_LANG_PHP}" = "Y" ] || [ "${CRAWLAB_SERVER_LANG_GO}" = "Y" ];
 then
 	echo "installing languages"
 	echo "you can view log at /var/log/install.sh.log"
